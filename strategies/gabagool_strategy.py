@@ -269,6 +269,20 @@ class GabagoolStrategy:
 
             if not yes_order:
                 self.logger.error("Failed to place YES order")
+                # Notify Telegram about the failed YES order
+                try:
+                    from src.telegram_notifier import send_order_failed
+                    profit_margin = 1.0 - (yes_price + no_price)
+                    asyncio.create_task(send_order_failed(
+                        market_id=market_id,
+                        side="YES",
+                        error_msg="Order returned None — likely rejected by Polymarket (400/403)",
+                        yes_price=yes_price,
+                        no_price=no_price,
+                        profit_margin=profit_margin
+                    ))
+                except Exception as notify_err:
+                    self.logger.error("Failed to send order alert: %s", notify_err)
                 return False
 
             self.logger.info("YES order placed: %s", yes_order.get("orderID", ""))
@@ -287,6 +301,20 @@ class GabagoolStrategy:
 
             if not no_order:
                 self.logger.error("Failed to place NO order - YES order still active!")
+                # Notify Telegram about the failed NO order (critical — YES is already open!)
+                try:
+                    from src.telegram_notifier import send_order_failed
+                    profit_margin = 1.0 - (yes_price + no_price)
+                    asyncio.create_task(send_order_failed(
+                        market_id=market_id,
+                        side="NO (CRITICAL: YES order already placed!)",
+                        error_msg="NO order returned None — YES leg is open without hedge!",
+                        yes_price=yes_price,
+                        no_price=no_price,
+                        profit_margin=profit_margin
+                    ))
+                except Exception as notify_err:
+                    self.logger.error("Failed to send order alert: %s", notify_err)
                 # TODO: Consider canceling YES order or handling partial fill
                 return False
 
