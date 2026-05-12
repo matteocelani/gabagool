@@ -259,24 +259,35 @@ class GabagoolStrategy:
 
         try:
             # Place YES order (wrap sync method)
-            yes_order = await asyncio.to_thread(
-                self.bot.place_order,
-                market.yes_token_id,
-                yes_price,
-                yes_shares,
-                "BUY"
-            )
-
-            if not yes_order:
-                self.logger.error("Failed to place YES order")
-                # Notify Telegram about the failed YES order
+            try:
+                yes_order = await asyncio.to_thread(
+                    self.bot.place_order,
+                    market.yes_token_id,
+                    yes_price,
+                    yes_shares,
+                    "BUY"
+                )
+            except Exception as order_err:
+                self.logger.error("Failed to place YES order: %s", order_err)
+                # Notify Telegram with the real error details
                 try:
+                    from src.client import ApiError
                     from src.telegram_notifier import send_order_failed
                     profit_margin = 1.0 - (yes_price + no_price)
+                    status_code = getattr(order_err, 'status_code', 0)
+                    raw_body = getattr(order_err, 'response_body', '')
+                    # Try to parse JSON body for cleaner message
+                    try:
+                        import json
+                        body_data = json.loads(raw_body)
+                        body_msg = json.dumps(body_data, indent=2)
+                    except Exception:
+                        body_msg = raw_body or str(order_err)
+                    error_detail = f"HTTP {status_code}\n{body_msg}" if status_code else str(order_err)
                     asyncio.create_task(send_order_failed(
                         market_id=market_id,
                         side="YES",
-                        error_msg="Order returned None — likely rejected by Polymarket (400/403)",
+                        error_msg=error_detail,
                         yes_price=yes_price,
                         no_price=no_price,
                         profit_margin=profit_margin
@@ -291,24 +302,34 @@ class GabagoolStrategy:
             await asyncio.sleep(0.5)
 
             # Place NO order (wrap sync method)
-            no_order = await asyncio.to_thread(
-                self.bot.place_order,
-                market.no_token_id,
-                no_price,
-                no_shares,
-                "BUY"
-            )
-
-            if not no_order:
-                self.logger.error("Failed to place NO order - YES order still active!")
-                # Notify Telegram about the failed NO order (critical — YES is already open!)
+            try:
+                no_order = await asyncio.to_thread(
+                    self.bot.place_order,
+                    market.no_token_id,
+                    no_price,
+                    no_shares,
+                    "BUY"
+                )
+            except Exception as order_err:
+                self.logger.error("Failed to place NO order - YES order still active!: %s", order_err)
+                # Notify Telegram — critical: YES is already open!
                 try:
+                    from src.client import ApiError
                     from src.telegram_notifier import send_order_failed
                     profit_margin = 1.0 - (yes_price + no_price)
+                    status_code = getattr(order_err, 'status_code', 0)
+                    raw_body = getattr(order_err, 'response_body', '')
+                    try:
+                        import json
+                        body_data = json.loads(raw_body)
+                        body_msg = json.dumps(body_data, indent=2)
+                    except Exception:
+                        body_msg = raw_body or str(order_err)
+                    error_detail = f"HTTP {status_code}\n{body_msg}" if status_code else str(order_err)
                     asyncio.create_task(send_order_failed(
                         market_id=market_id,
                         side="NO (CRITICAL: YES order already placed!)",
-                        error_msg="NO order returned None — YES leg is open without hedge!",
+                        error_msg=error_detail,
                         yes_price=yes_price,
                         no_price=no_price,
                         profit_margin=profit_margin

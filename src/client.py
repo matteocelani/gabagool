@@ -62,7 +62,16 @@ logger = logging.getLogger(__name__)
 
 class ApiError(Exception):
     """Base exception for API errors."""
-    pass
+    def __init__(self, message: str, status_code: int = 0, response_body: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        if self.status_code:
+            return f"[HTTP {self.status_code}] {base}"
+        return base
 
 
 class AuthenticationError(ApiError):
@@ -222,7 +231,7 @@ class ApiClient(ThreadLocalSessionMixin):
 
             except requests.exceptions.HTTPError as e:
                 if e.response is not None and e.response.status_code == 429:
-                    raise RateLimitError("Rate limit exceeded")
+                    raise RateLimitError("Rate limit exceeded", status_code=429)
                 last_error = e
                 self.logger.warning(f"HTTP error (attempt {attempt + 1}): {e}")
 
@@ -235,7 +244,21 @@ class ApiClient(ThreadLocalSessionMixin):
                 self.logger.debug(f"Retrying in {sleep_time}s...")
                 time.sleep(sleep_time)
 
-        raise ApiError(f"Request failed after {self.retry_count} attempts: {last_error}")
+        # Extract HTTP status code and response body from the last error if available
+        status_code = 0
+        response_body = ""
+        if isinstance(last_error, requests.exceptions.HTTPError) and last_error.response is not None:
+            status_code = last_error.response.status_code
+            try:
+                response_body = last_error.response.text
+            except Exception:
+                response_body = ""
+
+        raise ApiError(
+            f"Request failed after {self.retry_count} attempts: {last_error}",
+            status_code=status_code,
+            response_body=response_body
+        )
 
 
 class ClobClient(ApiClient):
