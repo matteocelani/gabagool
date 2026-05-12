@@ -236,10 +236,10 @@ class TradingBot:
 
         except ApiError as e:
             self.logger.error("Order failed: %s", e)
-            return None
+            raise  # Re-raise so callers get full error details (status_code, response_body)
         except Exception as e:
             self.logger.error("Unexpected error placing order: %s", e)
-            return None
+            raise
 
     def cancel_order(self, order_id: str) -> bool:
         """
