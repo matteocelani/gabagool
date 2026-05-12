@@ -337,6 +337,27 @@ class GabagoolStrategy:
                 market_id[:16], yes_price + no_price, profit_margin * 100
             )
 
+            # Send Telegram Notification asynchronously
+            try:
+                from src.telegram_notifier import send_arbitrage_executed
+                pos_summary = self.position_tracker.get_summary()
+                curr_exposure = pos_summary.get("total_exposure", 0.0)
+                max_exposure = getattr(self.risk_manager.config, "max_total_exposure", 500.0)
+                stats = self.stats_tracker.get_performance_summary()
+                
+                asyncio.create_task(send_arbitrage_executed(
+                    market_id=market_id,
+                    yes_price=yes_price,
+                    no_price=no_price,
+                    profit_margin=profit_margin,
+                    trade_size=self.config.trade_size,
+                    curr_exposure=curr_exposure,
+                    max_exposure=max_exposure,
+                    stats=stats
+                ))
+            except Exception as e:
+                self.logger.error("Failed to schedule telegram message: %s", e)
+
             return True
 
         except Exception as e:
