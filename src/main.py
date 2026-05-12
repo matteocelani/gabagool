@@ -505,10 +505,24 @@ async def main():
     else:
         logger.info("Skipping API connection in dry-run mode")
 
+    # Notify Telegram: bot is live
+    try:
+        from src.telegram_notifier import send_bot_started
+        config_summary = f"Exposure limit: ${config.gabagool.max_total_exposure:.0f} | Trade size: ${config.gabagool.max_position_per_market / 2:.0f}/side"
+        await send_bot_started(dry_run=args.dry_run, config_summary=config_summary)
+    except Exception as e:
+        logger.warning("Could not send startup telegram notification: %s", e)
+
     # Run main loop
     try:
         await gabagool.run_loop(scan_interval=args.scan_interval)
     finally:
+        # Notify Telegram: bot is stopping
+        try:
+            from src.telegram_notifier import send_bot_stopped
+            await send_bot_stopped("Graceful shutdown")
+        except Exception as e:
+            logger.warning("Could not send shutdown telegram notification: %s", e)
         gabagool.shutdown()
 
 
