@@ -338,37 +338,25 @@ class GabagoolStrategy:
             )
 
             # Send Telegram Notification asynchronously
-            from src.telegram_notifier import send_telegram_async
-            
             try:
+                from src.telegram_notifier import send_arbitrage_executed
                 pos_summary = self.position_tracker.get_summary()
                 curr_exposure = pos_summary.get("total_exposure", 0.0)
                 max_exposure = getattr(self.risk_manager.config, "max_total_exposure", 500.0)
-                
                 stats = self.stats_tracker.get_performance_summary()
-                tot_volume = stats.get("total_volume", 0.0)
-                tot_profit = stats.get("total_profit", 0.0)
-                win_rate = stats.get("win_rate", 0.0)
-                completed = stats.get("completed_trades", 0)
                 
-                msg = (
-                    f"🚨 <b>Arbitrage Executed!</b>\n\n"
-                    f"🎯 <b>Market:</b> <code>{market_id[:16]}...</code>\n"
-                    f"📈 <b>Cost YES:</b> ${yes_price:.4f}\n"
-                    f"📉 <b>Cost NO:</b> ${no_price:.4f}\n"
-                    f"💵 <b>Combined Cost:</b> ${(yes_price + no_price):.4f}\n"
-                    f"💰 <b>Est. Profit Margin:</b> {(profit_margin * 100):.2f}%\n"
-                    f"📊 <b>Position Size:</b> ${self.config.trade_size * 2:.2f} total\n\n"
-                    f"🏦 <b>Account Status:</b>\n"
-                    f"• Exposure: ${curr_exposure:.2f} / ${max_exposure:.2f}\n"
-                    f"• Total Vol Traded: ${tot_volume:.2f}\n"
-                    f"• Total Net Profit: ${tot_profit:.2f}\n"
-                    f"• Trades Completed: {completed}\n"
-                    f"• Win Rate: {(win_rate * 100):.1f}%"
-                )
-                asyncio.create_task(send_telegram_async(msg))
+                asyncio.create_task(send_arbitrage_executed(
+                    market_id=market_id,
+                    yes_price=yes_price,
+                    no_price=no_price,
+                    profit_margin=profit_margin,
+                    trade_size=self.config.trade_size,
+                    curr_exposure=curr_exposure,
+                    max_exposure=max_exposure,
+                    stats=stats
+                ))
             except Exception as e:
-                self.logger.error("Failed to build telegram message: %s", e)
+                self.logger.error("Failed to schedule telegram message: %s", e)
 
             return True
 

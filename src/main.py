@@ -320,9 +320,26 @@ class GabagoolBot:
         self.logger.info("-" * 60)
 
         loop_count = 0
+        last_summary_hour = -1
 
         while not shutdown_event.is_set():
             loop_count += 1
+            
+            # Send periodic telegram summary at 00:00, 08:00, 16:00
+            try:
+                from datetime import datetime
+                current_hour = datetime.now().hour
+                if current_hour in [0, 8, 16] and current_hour != last_summary_hour:
+                    from src.telegram_notifier import send_status_update
+                    pos_summary = self.position_tracker.get_summary()
+                    curr_exposure = pos_summary.get("total_exposure", 0.0)
+                    max_exposure = getattr(self.risk_manager.config, "max_total_exposure", 500.0)
+                    stats = self.stats_tracker.get_performance_summary()
+                    
+                    asyncio.create_task(send_status_update(curr_exposure, max_exposure, stats, self.consecutive_failures))
+                    last_summary_hour = current_hour
+            except Exception as e:
+                self.logger.error("Failed to schedule periodic telegram summary: %s", e)
 
             try:
                 # Check circuit breakers
@@ -336,6 +353,11 @@ class GabagoolBot:
 
                 if not can_continue:
                     self.logger.warning("Circuit breaker triggered: %s", reason)
+                    
+                    # Alert on circuit breaker
+                    from src.telegram_notifier import send_error_alert
+                    asyncio.create_task(send_error_alert(reason, "Circuit Breaker Triggered"))
+                    
                     # Wait longer before retrying
                     await asyncio.sleep(60)
                     continue
@@ -360,6 +382,13 @@ class GabagoolBot:
             except Exception as e:
                 self.consecutive_failures += 1
                 self.logger.error("Error in trading loop: %s", e)
+                
+                # Send error alert to telegram
+                try:
+                    from src.telegram_notifier import send_error_alert
+                    asyncio.create_task(send_error_alert(str(e), "Main Trading Loop Exception"))
+                except Exception as alert_err:
+                    self.logger.error("Failed to send error alert: %s", alert_err)
 
                 # If too many failures, increase backoff
                 if self.consecutive_failures >= 5:
