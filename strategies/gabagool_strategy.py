@@ -271,19 +271,21 @@ class GabagoolStrategy:
                 self.logger.error("Failed to place YES order: %s", order_err)
                 # Notify Telegram with the real error details
                 try:
-                    from src.client import ApiError
                     from src.telegram_notifier import send_order_failed
                     profit_margin = 1.0 - (yes_price + no_price)
                     status_code = getattr(order_err, 'status_code', 0)
                     raw_body = getattr(order_err, 'response_body', '')
-                    # Try to parse JSON body for cleaner message
+                    # Parse JSON body and extract the "error" field for a clean message
                     try:
                         import json
                         body_data = json.loads(raw_body)
-                        body_msg = json.dumps(body_data, indent=2)
+                        api_message = body_data.get('error', raw_body)
                     except Exception:
-                        body_msg = raw_body or str(order_err)
-                    error_detail = f"HTTP {status_code}\n{body_msg}" if status_code else str(order_err)
+                        api_message = raw_body or str(order_err)
+                    if status_code:
+                        error_detail = f"HTTP {status_code} — {api_message}"
+                    else:
+                        error_detail = api_message
                     asyncio.create_task(send_order_failed(
                         market_id=market_id,
                         side="YES",
@@ -314,7 +316,6 @@ class GabagoolStrategy:
                 self.logger.error("Failed to place NO order - YES order still active!: %s", order_err)
                 # Notify Telegram — critical: YES is already open!
                 try:
-                    from src.client import ApiError
                     from src.telegram_notifier import send_order_failed
                     profit_margin = 1.0 - (yes_price + no_price)
                     status_code = getattr(order_err, 'status_code', 0)
@@ -322,10 +323,13 @@ class GabagoolStrategy:
                     try:
                         import json
                         body_data = json.loads(raw_body)
-                        body_msg = json.dumps(body_data, indent=2)
+                        api_message = body_data.get('error', raw_body)
                     except Exception:
-                        body_msg = raw_body or str(order_err)
-                    error_detail = f"HTTP {status_code}\n{body_msg}" if status_code else str(order_err)
+                        api_message = raw_body or str(order_err)
+                    if status_code:
+                        error_detail = f"HTTP {status_code} — {api_message}"
+                    else:
+                        error_detail = api_message
                     asyncio.create_task(send_order_failed(
                         market_id=market_id,
                         side="NO (CRITICAL: YES order already placed!)",
