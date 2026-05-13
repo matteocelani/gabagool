@@ -30,6 +30,7 @@ Notes:
 """
 
 import time
+import random
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from eth_account import Account
@@ -235,9 +236,13 @@ class OrderSigner:
             SignerError: If signing fails
         """
         try:
+            # Generate a random salt — must be the same value used in both
+            # the EIP-712 signed struct and the API payload body.
+            salt = random.randint(1, 2**128)
+
             # Build order message for EIP-712
             order_message = {
-                "salt": 0,
+                "salt": salt,
                 "maker": to_checksum_address(order.maker),
                 "signer": self.address,
                 "taker": "0x0000000000000000000000000000000000000000",
@@ -260,19 +265,26 @@ class OrderSigner:
 
             signed = self.wallet.sign_message(signable)
 
+            # Build the order body with raw EIP-712 struct fields.
+            # The Polymarket CLOB API requires these exact fields (not price/size floats)
+            # and the signature must be embedded INSIDE the order object.
+            # See: https://docs.polymarket.com/resources/error-codes#post-order
             return {
                 "order": {
-                    "tokenId": order.token_id,
-                    "price": order.price,
-                    "size": order.size,
-                    "side": order.side,
-                    "maker": order.maker,
-                    "nonce": order.nonce,
-                    "feeRateBps": order.fee_rate_bps,
+                    "salt": str(salt),
+                    "maker": to_checksum_address(order.maker),
+                    "signer": self.address,
+                    "taker": "0x0000000000000000000000000000000000000000",
+                    "tokenId": order.token_id,            # string
+                    "makerAmount": order.maker_amount,    # string (USDC * 1e6)
+                    "takerAmount": order.taker_amount,    # string (shares * 1e6)
+                    "expiration": "0",
+                    "nonce": str(order.nonce),
+                    "feeRateBps": str(order.fee_rate_bps),
+                    "side": order.side_value,             # int: 0=BUY, 1=SELL
                     "signatureType": order.signature_type,
+                    "signature": "0x" + signed.signature.hex(),
                 },
-                "signature": "0x" + signed.signature.hex(),
-                "signer": self.address,
             }
 
         except Exception as e:
