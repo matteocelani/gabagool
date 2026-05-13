@@ -106,28 +106,46 @@ class OrderSigner:
         domain: EIP-712 domain separator
     """
 
-    # Polymarket CLOB EIP-712 domain
-    DOMAIN = {
+    # EIP-712 domain for L1 API authentication headers (unchanged in V2)
+    AUTH_DOMAIN = {
         "name": "ClobAuthDomain",
         "version": "1",
         "chainId": 137,  # Polygon mainnet
     }
 
-    # Order type definition for EIP-712
+    # EIP-712 domain for ORDER signing (Polymarket CLOB V2 — launched April 28 2026)
+    # Source: https://docs.polymarket.com/resources/contracts
+    ORDER_DOMAIN = {
+        "name": "Polymarket CTF Exchange",
+        "version": "2",
+        "chainId": 137,
+        "verifyingContract": "0xE111180000d2663C0091e4f400237545B87B996B",
+    }
+
+    # Neg-Risk markets use a separate contract
+    ORDER_DOMAIN_NEG_RISK = {
+        "name": "Polymarket CTF Exchange",
+        "version": "2",
+        "chainId": 137,
+        "verifyingContract": "0xe2222d279d744050d28e00520010520000310F59",
+    }
+
+    # Order struct for V2 — taker/nonce/feeRateBps/expiration REMOVED,
+    # timestamp/metadata/builder ADDED
+    # Source: https://github.com/Polymarket/ctf-exchange-v2
     ORDER_TYPES = {
         "Order": [
-            {"name": "salt", "type": "uint256"},
-            {"name": "maker", "type": "address"},
-            {"name": "signer", "type": "address"},
-            {"name": "taker", "type": "address"},
-            {"name": "tokenId", "type": "uint256"},
-            {"name": "makerAmount", "type": "uint256"},
-            {"name": "takerAmount", "type": "uint256"},
-            {"name": "expiration", "type": "uint256"},
-            {"name": "nonce", "type": "uint256"},
-            {"name": "feeRateBps", "type": "uint256"},
-            {"name": "side", "type": "uint8"},
+            {"name": "salt",          "type": "uint256"},
+            {"name": "maker",         "type": "address"},
+            {"name": "signer",        "type": "address"},
+            {"name": "tokenId",       "type": "uint256"},
+            {"name": "makerAmount",   "type": "uint256"},
+            {"name": "takerAmount",   "type": "uint256"},
+            {"name": "side",          "type": "uint8"},
             {"name": "signatureType", "type": "uint8"},
+            {"name": "timestamp",     "type": "uint64"},
+            {"name": "metadata",      "type": "bytes32"},
+            {"name": "builder",       "type": "bytes32"},
         ]
     }
 
@@ -214,7 +232,7 @@ class OrderSigner:
         }
 
         signable = encode_typed_data(
-            domain_data=self.DOMAIN,
+            domain_data=self.AUTH_DOMAIN,
             message_types=auth_types,
             message_data=message_data
         )
@@ -236,54 +254,54 @@ class OrderSigner:
             SignerError: If signing fails
         """
         try:
-            # Generate a random salt — must be the same value used in both
-            # the EIP-712 signed struct and the API payload body.
+            # Generate a random salt — must be the same in both the signed struct and payload.
             salt = random.randint(1, 2**128)
 
-            # Build order message for EIP-712
+            # Timestamp in milliseconds (V2 uses this instead of nonce for uniqueness)
+            ts_ms = int(time.time() * 1000)
+
+            # Build the V2 EIP-712 order message.
+            # V2 dropped: taker, nonce, feeRateBps, expiration
+            # V2 added:   timestamp (ms), metadata (bytes32), builder (bytes32)
             order_message = {
-                "salt": salt,
-                "maker": to_checksum_address(order.maker),
-                "signer": self.address,
-                "taker": "0x0000000000000000000000000000000000000000",
-                "tokenId": int(order.token_id),
-                "makerAmount": int(order.maker_amount),
-                "takerAmount": int(order.taker_amount),
-                "expiration": 0,
-                "nonce": order.nonce,
-                "feeRateBps": order.fee_rate_bps,
-                "side": order.side_value,
+                "salt":          salt,
+                "maker":         to_checksum_address(order.maker),
+                "signer":        self.address,
+                "tokenId":       int(order.token_id),
+                "makerAmount":   int(order.maker_amount),
+                "takerAmount":   int(order.taker_amount),
+                "side":          order.side_value,       # 0=BUY, 1=SELL
                 "signatureType": order.signature_type,
+                "timestamp":     ts_ms,
+                "metadata":      b"\x00" * 32,           # bytes32 zero
+                "builder":       b"\x00" * 32,           # bytes32 zero (no builder code)
             }
 
-            # Sign the order using EIP-712
+            # Sign using the V2 ORDER domain (not the auth domain)
             signable = encode_typed_data(
-                domain_data=self.DOMAIN,
+                domain_data=self.ORDER_DOMAIN,
                 message_types=self.ORDER_TYPES,
                 message_data=order_message
             )
 
             signed = self.wallet.sign_message(signable)
 
-            # Build the order body with raw EIP-712 struct fields.
-            # The Polymarket CLOB API requires these exact fields (not price/size floats)
-            # and the signature must be embedded INSIDE the order object.
-            # See: https://docs.polymarket.com/resources/error-codes#post-order
+            # Build the API payload body.
+            # The CLOB API expects the raw V2 struct fields with signature inside the order object.
             return {
                 "order": {
-                    "salt": str(salt),
-                    "maker": to_checksum_address(order.maker),
-                    "signer": self.address,
-                    "taker": "0x0000000000000000000000000000000000000000",
-                    "tokenId": order.token_id,            # string
-                    "makerAmount": order.maker_amount,    # string (USDC * 1e6)
-                    "takerAmount": order.taker_amount,    # string (shares * 1e6)
-                    "expiration": "0",
-                    "nonce": str(order.nonce),
-                    "feeRateBps": str(order.fee_rate_bps),
-                    "side": order.side_value,             # int: 0=BUY, 1=SELL
+                    "salt":          str(salt),
+                    "maker":         to_checksum_address(order.maker),
+                    "signer":        self.address,
+                    "tokenId":       order.token_id,          # string
+                    "makerAmount":   order.maker_amount,      # string (USDC * 1e6)
+                    "takerAmount":   order.taker_amount,      # string (shares * 1e6)
+                    "side":          order.side_value,        # int: 0=BUY, 1=SELL
                     "signatureType": order.signature_type,
-                    "signature": "0x" + signed.signature.hex(),
+                    "timestamp":     str(ts_ms),
+                    "metadata":      "0x" + (b"\x00" * 32).hex(),
+                    "builder":       "0x" + (b"\x00" * 32).hex(),
+                    "signature":     "0x" + signed.signature.hex(),
                 },
             }
 
