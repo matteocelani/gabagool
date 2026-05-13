@@ -632,16 +632,16 @@ class ClobClient(ApiClient):
         """
         endpoint = "/order"
 
-        # Build request body
+        # The signed_order["order"] dict already contains the signature embedded inside.
+        # The CLOB API expects: { order: { ...eip712fields..., signature }, owner, orderType }
+        # Do NOT add a top-level "signature" key — it goes inside the order object.
+        order_body = signed_order.get("order", signed_order)
+
         body = {
-            "order": signed_order.get("order", signed_order),
+            "order": order_body,
             "owner": self.funder,
             "orderType": order_type,
         }
-
-        # Add signature
-        if "signature" in signed_order:
-            body["signature"] = signed_order["signature"]
 
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)
