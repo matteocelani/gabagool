@@ -47,6 +47,19 @@ from pathlib import Path
 from .client import ClobClient, GammaClient, ApiCredentials, ApiError
 from .signer import OrderSigner, Order
 
+try:
+    from py_clob_client_v2 import (
+        ClobClient as SdkClobClient,
+        ApiCreds as SdkApiCreds,
+        OrderArgs,
+        OrderType as SdkOrderType,
+        PartialCreateOrderOptions,
+        Side,
+    )
+    HAS_SDK_V2 = True
+except ImportError:
+    HAS_SDK_V2 = False
+
 
 @dataclass
 class BotConfig:
@@ -67,6 +80,7 @@ class BotConfig:
     clob_api_url: str = "https://clob.polymarket.com"
     gamma_api_url: str = "https://gamma-api.polymarket.com"
     chain_id: int = 137
+    signature_type: int = 1
     dry_run: bool = False
     creds_path: str = "data/api_creds.json"
 
@@ -118,10 +132,12 @@ class TradingBot:
         self.gamma = GammaClient(host=config.gamma_api_url)
 
         self._connected = False
+        self.sdk_client: "SdkClobClient | None" = None
         self.logger.info(
-            "TradingBot initialized (dry_run=%s, address=%s...)",
+            "TradingBot initialized (dry_run=%s, address=%s..., sdk_v2=%s)",
             config.dry_run,
-            config.safe_address[:10] if config.safe_address else "none"
+            config.safe_address[:10] if config.safe_address else "none",
+            HAS_SDK_V2
         )
 
     def connect(self) -> bool:
@@ -129,6 +145,8 @@ class TradingBot:
         Connect to Polymarket and authenticate.
 
         Attempts to load cached API credentials, or derives new ones.
+        When py-clob-client-v2 is available, also initializes the SDK client
+        for order placement (handles EIP-712 signing internally).
 
         Returns:
             True if connection successful
@@ -141,6 +159,7 @@ class TradingBot:
                 creds = ApiCredentials.load(str(creds_path))
                 if creds.is_valid():
                     self.clob.set_api_creds(creds)
+                    self._init_sdk_client(creds)
                     self._connected = True
                     self.logger.info("Connected using cached credentials")
                     return True
@@ -151,6 +170,7 @@ class TradingBot:
 
             if creds.is_valid():
                 self.clob.set_api_creds(creds)
+                self._init_sdk_client(creds)
 
                 # Cache credentials
                 creds_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +187,31 @@ class TradingBot:
         except Exception as e:
             self.logger.error("Connection failed: %s", e)
             return False
+
+    def _init_sdk_client(self, creds: ApiCredentials) -> None:
+        """Initialize the official py-clob-client-v2 SDK client for order placement."""
+        if not HAS_SDK_V2:
+            self.logger.warning("py-clob-client-v2 not installed — orders will use legacy path")
+            return
+
+        try:
+            sdk_creds = SdkApiCreds(
+                api_key=creds.api_key,
+                api_secret=creds.secret,
+                api_passphrase=creds.passphrase,
+            )
+            self.sdk_client = SdkClobClient(
+                host=self.config.clob_api_url,
+                chain_id=self.config.chain_id,
+                key=self.config.private_key,
+                creds=sdk_creds,
+                signature_type=self.config.signature_type,
+                funder=self.config.safe_address,
+            )
+            self.logger.info("SDK V2 client initialized (sig_type=%d)", self.config.signature_type)
+        except Exception as e:
+            self.logger.error("Failed to init SDK V2 client: %s", e)
+            self.sdk_client = None
 
     @property
     def is_connected(self) -> bool:
@@ -186,7 +231,7 @@ class TradingBot:
         order_type: str = "GTC"
     ) -> Optional[Dict[str, Any]]:
         """
-        Place an order on Polymarket.
+        Place an order on Polymarket using the official SDK.
 
         Args:
             token_id: The token ID (YES or NO token)
@@ -213,33 +258,42 @@ class TradingBot:
                 "side": side,
             }
 
-        try:
-            # Sign the order
-            signed = self.signer.sign_order_dict(
-                token_id=token_id,
-                price=price,
-                size=size,
-                side=side,
-                maker=self.config.safe_address,
-            )
+        if not self.sdk_client:
+            raise ApiError("SDK V2 client not initialized — cannot place orders")
 
-            # Submit to CLOB
-            result = self.clob.post_order(signed, order_type=order_type)
+        try:
+            sdk_side = Side.BUY if side == "BUY" else Side.SELL
+            sdk_order_type = getattr(SdkOrderType, order_type, SdkOrderType.GTC)
+
+            # SDK handles EIP-712 signing, HMAC auth, and payload construction
+            result = self.sdk_client.create_and_post_order(
+                order_args=OrderArgs(
+                    token_id=token_id,
+                    price=price,
+                    side=sdk_side,
+                    size=size,
+                ),
+                options=PartialCreateOrderOptions(),
+                order_type=sdk_order_type,
+            )
 
             self.logger.info(
                 "Order placed: %s %s @ $%.3f x %.2f -> %s",
                 side, token_id[:16], price, size,
-                result.get("orderID", "unknown")
+                result.get("orderID", "unknown") if isinstance(result, dict) else str(result)
             )
 
-            return result
+            return result if isinstance(result, dict) else {"raw": result}
 
-        except ApiError as e:
-            self.logger.error("Order failed: %s", e)
-            raise  # Re-raise so callers get full error details (status_code, response_body)
         except Exception as e:
-            self.logger.error("Unexpected error placing order: %s", e)
-            raise
+            self.logger.error("Order failed: %s", e)
+            status_code = getattr(e, 'status_code', 0)
+            response_body = getattr(e, 'response_body', str(e))
+            raise ApiError(
+                str(e),
+                status_code=status_code if status_code else 400,
+                response_body=response_body if response_body else str(e)
+            )
 
     def cancel_order(self, order_id: str) -> bool:
         """
@@ -492,6 +546,7 @@ def create_bot_from_config(config: "Config") -> TradingBot:
         safe_address=config.safe_address,
         clob_api_url=config.clob.host,
         chain_id=config.clob.chain_id,
+        signature_type=config.clob.signature_type,
         dry_run=config.dry_run,
         creds_path=str(Path(config.data_dir) / "api_creds.json"),
     )

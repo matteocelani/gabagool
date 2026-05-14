@@ -107,7 +107,7 @@ class ClobConfig:
     """CLOB (Central Limit Order Book) configuration."""
     host: str = "https://clob.polymarket.com"
     chain_id: int = 137
-    signature_type: int = 2  # Gnosis Safe
+    signature_type: int = 1  # Polymarket Proxy wallet
 
     def is_valid(self) -> bool:
         """Validate CLOB configuration."""
@@ -187,8 +187,7 @@ class Config:
 
     def __post_init__(self):
         """Validate and normalize configuration."""
-        if self.safe_address:
-            self.safe_address = self.safe_address.lower()
+        pass
 
     @classmethod
     def load(cls, filepath: str = "config/default.yaml") -> "Config":
@@ -357,7 +356,7 @@ class Config:
         # Override with environment variables
         safe_address = get_env("SAFE_ADDRESS")
         if safe_address:
-            config.safe_address = safe_address.lower()
+            config.safe_address = safe_address
 
         rpc_url = get_env("RPC_URL")
         if rpc_url:
