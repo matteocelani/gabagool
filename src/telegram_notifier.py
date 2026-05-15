@@ -39,6 +39,52 @@ def _profile_line() -> str:
     return f"👤 <b>Profile:</b> <a href=\"{url}\">{addr[:10]}…</a>"
 
 
+def _interpret_order_error(error_msg: str) -> str:
+    """Return a one-line, plain-English explanation for the given CLOB error.
+
+    Returns '' if the error doesn't match any known pattern — in that case the
+    notification will just show the raw error message without padding.
+    """
+    if not error_msg:
+        return ""
+    e = error_msg.lower()
+
+    if "cancel-only" in e or "cancel only" in e:
+        return (
+            "Polymarket is in <b>cancel-only mode</b> (maintenance). "
+            "New orders are temporarily blocked; the bot will resume "
+            "automatically when trading reopens."
+        )
+    if "not enough" in e and "balance" in e:
+        return "Funder wallet has not enough pUSD to fill this order."
+    if "insufficient balance" in e or "insufficient funds" in e:
+        return "Funder wallet has not enough pUSD to fill this order."
+    if "invalid tick" in e or "tick size" in e:
+        return "Order price is not aligned to the market tick size (0.01 / 0.001 / 0.0001)."
+    if "maker address not allowed" in e:
+        return (
+            "Backend rejected the maker address — wrong "
+            "<code>signature_type</code> / <code>funder</code> combination for this account."
+        )
+    if "order signer address has to be the address of the api key" in e or (
+        "signer" in e and "api key" in e
+    ):
+        return (
+            "CLOB API key is bound to a different signer than the one in the order. "
+            "Re-derive credentials with the right <code>signature_type</code> and <code>funder</code>."
+        )
+    if "orderbook does not exist" in e:
+        return "This market has no active orderbook (probably closed or paused)."
+    if "trading restricted" in e or "geo" in e:
+        return "Trading restricted in your region. VPN required."
+    if "503" in e and "service" in e:
+        return "Polymarket service temporarily unavailable. Retry later."
+    if "403" in e:
+        return "Request blocked (likely geo-restriction). Check VPN."
+
+    return ""
+
+
 # ─── LIFECYCLE EVENTS ────────────────────────────────────────────────────────
 
 async def send_bot_started(dry_run: bool, config_summary: str = ""):
@@ -122,10 +168,12 @@ async def send_order_failed(
     no_price: float = 0.0,
     profit_margin: float = 0.0
 ):
-    """Notify when a YES or NO order placement fails (400, 403, etc.)."""
+    """Notify when a YES or NO order placement fails (400, 403, 503, etc.)."""
     now = datetime.now().strftime("%H:%M:%S")
     profile_line = _profile_line()
     profile_block = f"\n\n{profile_line}" if profile_line else ""
+    interpretation = _interpret_order_error(error_msg)
+    interpretation_block = f"\n\nℹ️ {interpretation}" if interpretation else ""
     msg = (
         f"❌ <b>Order Failed — {side} Side</b>\n\n"
         f"🕐 <b>Time:</b> {now}\n"
@@ -134,13 +182,8 @@ async def send_order_failed(
         f"📈 <b>YES Price:</b> ${yes_price:.4f}\n"
         f"📉 <b>NO Price:</b> ${no_price:.4f}\n"
         f"💰 <b>Missed Margin:</b> {(profit_margin * 100):.2f}%\n\n"
-        f"⚠️ <b>Error:</b> <code>{error_msg}</code>\n\n"
-        f"The limit order was rejected by Polymarket. Common causes:\n"
-        f"• <code>insufficient balance</code> → not enough pUSD on the funder wallet\n"
-        f"• <code>invalid tick size</code> → price not aligned to the market tick\n"
-        f"• <code>maker not allowed</code> → wrong signature_type/funder combination\n"
-        f"• <code>signer mismatch</code> → API key not bound to the configured signer\n"
-        f"• HTTP 403 → geo-blocked (VPN required)"
+        f"⚠️ <b>Error:</b> <code>{error_msg}</code>"
+        f"{interpretation_block}"
         f"{profile_block}"
     )
     await send_telegram_async(msg)
