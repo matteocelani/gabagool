@@ -107,7 +107,7 @@ class ClobConfig:
     """CLOB (Central Limit Order Book) configuration."""
     host: str = "https://clob.polymarket.com"
     chain_id: int = 137
-    signature_type: int = 1  # Polymarket Proxy wallet
+    signature_type: int = 3  # POLY_1271 (deposit wallet smart-contract via ERC-1271)
 
     def is_valid(self) -> bool:
         """Validate CLOB configuration."""

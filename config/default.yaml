@@ -27,7 +27,7 @@ rpc_url: "https://polygon-rpc.com"
 clob:
   host: "https://clob.polymarket.com"
   chain_id: 137               # Polygon mainnet
-  signature_type: 1           # Polymarket Proxy wallet (0=EOA, 1=PROXY, 2=GNOSIS, 3=DEPOSIT)
+  signature_type: 3           # POLY_1271 (deposit wallet smart-contract via ERC-1271)
 
 # =============================================================================
 # GABAGOOL STRATEGY CONFIGURATION

@@ -97,9 +97,13 @@ class ApiCredentials:
     These credentials are derived from an L1 EIP-712 signature
     and used for authenticated endpoints (orders, trades, etc.).
     """
-    api_key: str
-    secret: str
-    passphrase: str
+
+    def __init__(self, api_key: str, secret: str, passphrase: str, safe_address: str = "") -> None:
+        self.api_key = api_key
+        self.secret = secret
+        self.passphrase = passphrase
+        # Stored to detect when the configured safe address changes between restarts.
+        self.safe_address = safe_address
 
     @classmethod
     def load(cls, filepath: str) -> "ApiCredentials":
@@ -110,6 +114,7 @@ class ApiCredentials:
             api_key=data.get("apiKey", ""),
             secret=data.get("secret", ""),
             passphrase=data.get("passphrase", ""),
+            safe_address=data.get("safeAddress", ""),
         )
 
     def save(self, filepath: str) -> None:
@@ -125,6 +130,7 @@ class ApiCredentials:
                 "apiKey": self.api_key,
                 "secret": self.secret,
                 "passphrase": self.passphrase,
+                "safeAddress": self.safe_address,
             }, f, indent=2)
 
         os.chmod(path, 0o600)
