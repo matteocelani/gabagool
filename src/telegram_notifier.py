@@ -12,7 +12,12 @@ def send_telegram_sync(message: str):
     if not token or not chat_id:
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
     try:
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
@@ -23,6 +28,17 @@ async def send_telegram_async(message: str):
     await asyncio.to_thread(send_telegram_sync, message)
 
 
+# ─── Polymarket profile link helper ──────────────────────────────────────────
+
+def _profile_line() -> str:
+    """Return a 'Profile: <url>' line for the configured safe address, or ''."""
+    addr = os.environ.get("POLY_SAFE_ADDRESS", "").strip()
+    if not addr:
+        return ""
+    url = f"https://polymarket.com/it/profile/{addr}"
+    return f"👤 <b>Profile:</b> <a href=\"{url}\">{addr[:10]}…</a>"
+
+
 # ─── LIFECYCLE EVENTS ────────────────────────────────────────────────────────
 
 async def send_bot_started(dry_run: bool, config_summary: str = ""):
@@ -30,12 +46,16 @@ async def send_bot_started(dry_run: bool, config_summary: str = ""):
     mode = "🧪 DRY RUN" if dry_run else "🔴 LIVE TRADING"
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     config_line = f"\n📋 <b>Config:</b> {config_summary}" if config_summary else ""
+    profile_line = _profile_line()
+    profile_block = f"\n{profile_line}" if profile_line else ""
     msg = (
         f"🚀 <b>Gabagool Bot Started</b>\n\n"
         f"🕐 <b>Time:</b> {now}\n"
         f"⚙️ <b>Mode:</b> {mode}"
-        f"{config_line}\n\n"
-        f"The bot is now scanning Polymarket for arbitrage opportunities."
+        f"{config_line}"
+        f"{profile_block}\n\n"
+        f"The bot is now scanning Polymarket for arbitrage opportunities "
+        f"and placing GTC limit orders when a profitable spread is found."
     )
     await send_telegram_async(msg)
 
@@ -70,11 +90,14 @@ async def send_arbitrage_executed(
     win_rate = stats.get("win_rate", 0.0)
     completed = stats.get("completed_trades", 0)
     now = datetime.now().strftime("%H:%M:%S")
+    profile_line = _profile_line()
+    profile_block = f"\n{profile_line}" if profile_line else ""
 
     msg = (
         f"✅ <b>Arbitrage Executed!</b>\n\n"
         f"🕐 <b>Time:</b> {now}\n"
         f"🎯 <b>Market:</b> <code>{market_id[:20]}...</code>\n"
+        f"📦 <b>Order type:</b> GTC Limit (YES + NO)\n"
         f"📈 <b>Cost YES:</b> ${yes_price:.4f}\n"
         f"📉 <b>Cost NO:</b> ${no_price:.4f}\n"
         f"💵 <b>Combined Cost:</b> ${(yes_price + no_price):.4f}\n"
@@ -86,6 +109,7 @@ async def send_arbitrage_executed(
         f"• Total Net Profit: ${tot_profit:.2f}\n"
         f"• Trades Completed: {completed}\n"
         f"• Win Rate: {(win_rate * 100):.1f}%"
+        f"{profile_block}"
     )
     await send_telegram_async(msg)
 
@@ -100,16 +124,24 @@ async def send_order_failed(
 ):
     """Notify when a YES or NO order placement fails (400, 403, etc.)."""
     now = datetime.now().strftime("%H:%M:%S")
+    profile_line = _profile_line()
+    profile_block = f"\n\n{profile_line}" if profile_line else ""
     msg = (
         f"❌ <b>Order Failed — {side} Side</b>\n\n"
         f"🕐 <b>Time:</b> {now}\n"
         f"🎯 <b>Market:</b> <code>{market_id[:20]}...</code>\n"
+        f"📦 <b>Order type:</b> GTC Limit\n"
         f"📈 <b>YES Price:</b> ${yes_price:.4f}\n"
         f"📉 <b>NO Price:</b> ${no_price:.4f}\n"
         f"💰 <b>Missed Margin:</b> {(profit_margin * 100):.2f}%\n\n"
         f"⚠️ <b>Error:</b> <code>{error_msg}</code>\n\n"
-        f"The opportunity was found but the order was rejected. "
-        f"Possible causes: geo-block (403), bad params (400), or insufficient funds."
+        f"The limit order was rejected by Polymarket. Common causes:\n"
+        f"• <code>insufficient balance</code> → not enough pUSD on the funder wallet\n"
+        f"• <code>invalid tick size</code> → price not aligned to the market tick\n"
+        f"• <code>maker not allowed</code> → wrong signature_type/funder combination\n"
+        f"• <code>signer mismatch</code> → API key not bound to the configured signer\n"
+        f"• HTTP 403 → geo-blocked (VPN required)"
+        f"{profile_block}"
     )
     await send_telegram_async(msg)
 
@@ -130,12 +162,14 @@ async def send_status_update(
     pending = stats.get("pending_trades", 0)
     failed = stats.get("failed_trades", 0)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    profile_line = _profile_line()
+    profile_block = f"\n\n{profile_line}" if profile_line else ""
 
     status_emoji = "🟢" if consecutive_failures == 0 else "🟠"
 
     msg = (
         f"⏱️ <b>Bot Status Update</b>\n\n"
-        f"{status_emoji} Bot is actively scanning markets.\n"
+        f"{status_emoji} Bot is actively scanning markets (GTC limit orders).\n"
         f"🕐 <b>Report Time:</b> {now}\n"
         f"⚠️ <b>Consecutive Failures:</b> {consecutive_failures}\n\n"
         f"🏦 <b>Account Summary:</b>\n"
@@ -146,6 +180,7 @@ async def send_status_update(
         f"• Total Vol Traded: ${tot_volume:.2f}\n"
         f"• Total Net Profit: ${tot_profit:.2f}\n"
         f"• Win Rate: {(win_rate * 100):.1f}%"
+        f"{profile_block}"
     )
     await send_telegram_async(msg)
 
