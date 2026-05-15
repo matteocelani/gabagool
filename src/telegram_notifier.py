@@ -39,6 +39,38 @@ def _profile_line() -> str:
     return f"👤 <b>Profile:</b> <a href=\"{url}\">{addr[:10]}…</a>"
 
 
+def _resolve_market_url(market_id: str) -> str:
+    """Resolve a Polymarket internal market id to a clickable event URL.
+
+    Hits Gamma API to fetch the market slug. Returns '' on any failure.
+    This is a sync function — run it via asyncio.to_thread() from coroutines.
+    """
+    if not market_id:
+        return ""
+    try:
+        r = requests.get(
+            f"https://gamma-api.polymarket.com/markets/{market_id}",
+            timeout=3,
+        )
+        if r.status_code != 200:
+            return ""
+        data = r.json()
+        slug = data.get("slug")
+        if not slug:
+            return ""
+        return f"https://polymarket.com/it/event/{slug}"
+    except Exception:
+        return ""
+
+
+def _market_line(market_id: str, market_url: str) -> str:
+    """Build the '🎯 Market' line, clickable when a URL is available."""
+    short = f"{market_id[:20]}..." if market_id else "?"
+    if market_url:
+        return f"🎯 <b>Market:</b> <a href=\"{market_url}\">{short}</a>"
+    return f"🎯 <b>Market:</b> <code>{short}</code>"
+
+
 def _interpret_order_error(error_msg: str) -> str:
     """Return a one-line, plain-English explanation for the given CLOB error.
 
@@ -138,11 +170,13 @@ async def send_arbitrage_executed(
     now = datetime.now().strftime("%H:%M:%S")
     profile_line = _profile_line()
     profile_block = f"\n{profile_line}" if profile_line else ""
+    market_url = await asyncio.to_thread(_resolve_market_url, market_id)
+    market_line = _market_line(market_id, market_url)
 
     msg = (
         f"✅ <b>Arbitrage Executed!</b>\n\n"
         f"🕐 <b>Time:</b> {now}\n"
-        f"🎯 <b>Market:</b> <code>{market_id[:20]}...</code>\n"
+        f"{market_line}\n"
         f"📦 <b>Order type:</b> GTC Limit (YES + NO)\n"
         f"📈 <b>Cost YES:</b> ${yes_price:.4f}\n"
         f"📉 <b>Cost NO:</b> ${no_price:.4f}\n"
@@ -174,10 +208,12 @@ async def send_order_failed(
     profile_block = f"\n\n{profile_line}" if profile_line else ""
     interpretation = _interpret_order_error(error_msg)
     interpretation_block = f"\n\nℹ️ {interpretation}" if interpretation else ""
+    market_url = await asyncio.to_thread(_resolve_market_url, market_id)
+    market_line = _market_line(market_id, market_url)
     msg = (
         f"❌ <b>Order Failed — {side} Side</b>\n\n"
         f"🕐 <b>Time:</b> {now}\n"
-        f"🎯 <b>Market:</b> <code>{market_id[:20]}...</code>\n"
+        f"{market_line}\n"
         f"📦 <b>Order type:</b> GTC Limit\n"
         f"📈 <b>YES Price:</b> ${yes_price:.4f}\n"
         f"📉 <b>NO Price:</b> ${no_price:.4f}\n"
