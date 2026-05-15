@@ -39,36 +39,41 @@ def _profile_line() -> str:
     return f"👤 <b>Profile:</b> <a href=\"{url}\">{addr[:10]}…</a>"
 
 
-def _resolve_market_url(market_id: str) -> str:
-    """Resolve a Polymarket internal market id to a clickable event URL.
+def _resolve_market_info(market_id: str) -> tuple:
+    """Resolve a Polymarket internal market id to (event_url, question_text).
 
-    Hits Gamma API to fetch the market slug. Returns '' on any failure.
-    This is a sync function — run it via asyncio.to_thread() from coroutines.
+    Hits Gamma API. Returns ('', '') on any failure.
+    Sync function — run it via asyncio.to_thread() from coroutines.
     """
     if not market_id:
-        return ""
+        return "", ""
     try:
         r = requests.get(
             f"https://gamma-api.polymarket.com/markets/{market_id}",
             timeout=3,
         )
         if r.status_code != 200:
-            return ""
+            return "", ""
         data = r.json()
-        slug = data.get("slug")
-        if not slug:
-            return ""
-        return f"https://polymarket.com/it/event/{slug}"
+        slug = data.get("slug") or ""
+        question = data.get("question") or ""
+        url = f"https://polymarket.com/it/event/{slug}" if slug else ""
+        return url, question
     except Exception:
-        return ""
+        return "", ""
 
 
-def _market_line(market_id: str, market_url: str) -> str:
-    """Build the '🎯 Market' line, clickable when a URL is available."""
-    short = f"{market_id[:20]}..." if market_id else "?"
+def _market_line(market_id: str, market_url: str, market_question: str = "") -> str:
+    """Build the '🎯 Market' line, preferring readable question text + URL."""
+    if market_question:
+        label = market_question if len(market_question) <= 60 else market_question[:57] + "..."
+    elif market_id:
+        label = f"{market_id[:20]}..."
+    else:
+        label = "?"
     if market_url:
-        return f"🎯 <b>Market:</b> <a href=\"{market_url}\">{short}</a>"
-    return f"🎯 <b>Market:</b> <code>{short}</code>"
+        return f"🎯 <b>Market:</b> <a href=\"{market_url}\">{label}</a>"
+    return f"🎯 <b>Market:</b> <code>{label}</code>"
 
 
 def _interpret_order_error(error_msg: str) -> str:
@@ -170,8 +175,8 @@ async def send_arbitrage_executed(
     now = datetime.now().strftime("%H:%M:%S")
     profile_line = _profile_line()
     profile_block = f"\n{profile_line}" if profile_line else ""
-    market_url = await asyncio.to_thread(_resolve_market_url, market_id)
-    market_line = _market_line(market_id, market_url)
+    market_url, market_question = await asyncio.to_thread(_resolve_market_info, market_id)
+    market_line = _market_line(market_id, market_url, market_question)
 
     msg = (
         f"✅ <b>Arbitrage Executed!</b>\n\n"
@@ -208,8 +213,8 @@ async def send_order_failed(
     profile_block = f"\n\n{profile_line}" if profile_line else ""
     interpretation = _interpret_order_error(error_msg)
     interpretation_block = f"\n\nℹ️ {interpretation}" if interpretation else ""
-    market_url = await asyncio.to_thread(_resolve_market_url, market_id)
-    market_line = _market_line(market_id, market_url)
+    market_url, market_question = await asyncio.to_thread(_resolve_market_info, market_id)
+    market_line = _market_line(market_id, market_url, market_question)
     msg = (
         f"❌ <b>Order Failed — {side} Side</b>\n\n"
         f"🕐 <b>Time:</b> {now}\n"
