@@ -47,6 +47,19 @@ from pathlib import Path
 from .client import ClobClient, GammaClient, ApiCredentials, ApiError
 from .signer import OrderSigner, Order
 
+try:
+    from py_clob_client_v2 import (
+        ClobClient as SdkClobClient,
+        ApiCreds as SdkApiCreds,
+        OrderArgs,
+        OrderType as SdkOrderType,
+        PartialCreateOrderOptions,
+        Side,
+    )
+    HAS_SDK_V2 = True
+except ImportError:
+    HAS_SDK_V2 = False
+
 
 @dataclass
 class BotConfig:
@@ -67,6 +80,7 @@ class BotConfig:
     clob_api_url: str = "https://clob.polymarket.com"
     gamma_api_url: str = "https://gamma-api.polymarket.com"
     chain_id: int = 137
+    signature_type: int = 1
     dry_run: bool = False
     creds_path: str = "data/api_creds.json"
 
@@ -118,55 +132,131 @@ class TradingBot:
         self.gamma = GammaClient(host=config.gamma_api_url)
 
         self._connected = False
+        self.sdk_client: "SdkClobClient | None" = None
         self.logger.info(
-            "TradingBot initialized (dry_run=%s, address=%s...)",
+            "TradingBot initialized (dry_run=%s, address=%s..., sdk_v2=%s)",
             config.dry_run,
-            config.safe_address[:10] if config.safe_address else "none"
+            config.safe_address[:10] if config.safe_address else "none",
+            HAS_SDK_V2
         )
 
     def connect(self) -> bool:
         """
         Connect to Polymarket and authenticate.
 
-        Attempts to load cached API credentials, or derives new ones.
+        Uses the official SDK for API key derivation to ensure address
+        consistency between authentication and order signing.
 
         Returns:
             True if connection successful
         """
+        if not HAS_SDK_V2:
+            self.logger.error("py-clob-client-v2 is required but not installed")
+            return False
+
         try:
-            # Try to load cached credentials
             creds_path = Path(self.config.creds_path)
+
+            # Load cached credentials only if they were derived for the same safe_address.
             if creds_path.exists():
                 self.logger.info("Loading cached API credentials...")
-                creds = ApiCredentials.load(str(creds_path))
-                if creds.is_valid():
-                    self.clob.set_api_creds(creds)
-                    self._connected = True
-                    self.logger.info("Connected using cached credentials")
-                    return True
+                cached = ApiCredentials.load(str(creds_path))
+                cached_safe = getattr(cached, 'safe_address', None)
+                safe_matches = (
+                    cached_safe is None or
+                    cached_safe.lower() == self.config.safe_address.lower()
+                )
+                if cached.is_valid() and safe_matches:
+                    self._init_sdk_client(cached)
+                    if self.sdk_client:
+                        self._connected = True
+                        self.logger.info("Connected using cached credentials")
+                        return True
+                else:
+                    self.logger.warning(
+                        "Cached creds are stale (safe=%s vs current=%s) — re-deriving",
+                        cached_safe, self.config.safe_address
+                    )
+                    creds_path.unlink()
 
-            # Derive new credentials
-            self.logger.info("Deriving new API credentials...")
-            creds = self.clob.create_or_derive_api_key(self.signer)
+            # Derive new credentials via SDK (ensures address consistency)
+            self.logger.info("Deriving API credentials via SDK...")
+            sdk_creds = self._derive_creds_via_sdk()
+            if not sdk_creds:
+                self.logger.error("Failed to derive valid credentials")
+                return False
 
-            if creds.is_valid():
-                self.clob.set_api_creds(creds)
+            # Cache credentials alongside the safe_address they were derived for.
+            creds_path.parent.mkdir(parents=True, exist_ok=True)
+            local_creds = ApiCredentials(
+                api_key=sdk_creds.api_key,
+                secret=sdk_creds.api_secret,
+                passphrase=sdk_creds.api_passphrase,
+            )
+            local_creds.safe_address = self.config.safe_address
+            local_creds.save(str(creds_path))
+            self.logger.info("Credentials cached to %s (safe=%s)", creds_path, self.config.safe_address[:10])
 
-                # Cache credentials
-                creds_path.parent.mkdir(parents=True, exist_ok=True)
-                creds.save(str(creds_path))
-                self.logger.info("Credentials cached to %s", creds_path)
-
-                self._connected = True
-                self.logger.info("Connected successfully")
-                return True
-
-            self.logger.error("Failed to derive valid credentials")
-            return False
+            self._connected = True
+            self.logger.info("Connected successfully")
+            return True
 
         except Exception as e:
             self.logger.error("Connection failed: %s", e)
             return False
+
+    def _derive_creds_via_sdk(self) -> "SdkApiCreds | None":
+        """Derive API credentials using the SDK, then init the full SDK client."""
+        try:
+            temp_client = SdkClobClient(
+                host=self.config.clob_api_url,
+                chain_id=self.config.chain_id,
+                key=self.config.private_key,
+                signature_type=self.config.signature_type,
+                funder=self.config.safe_address or None,
+            )
+            sdk_creds = temp_client.create_or_derive_api_key()
+            if not sdk_creds.api_key:
+                return None
+
+            # Now init the real client with creds
+            self.sdk_client = SdkClobClient(
+                host=self.config.clob_api_url,
+                chain_id=self.config.chain_id,
+                key=self.config.private_key,
+                creds=sdk_creds,
+                signature_type=self.config.signature_type,
+                funder=self.config.safe_address or None,
+            )
+            self.logger.info("SDK V2 client initialized (sig_type=%d)", self.config.signature_type)
+            return sdk_creds
+        except Exception as e:
+            self.logger.error("SDK credential derivation failed: %s", e)
+            return None
+
+    def _init_sdk_client(self, creds: ApiCredentials) -> None:
+        """Initialize the SDK client from cached local credentials."""
+        if not HAS_SDK_V2:
+            return
+
+        try:
+            sdk_creds = SdkApiCreds(
+                api_key=creds.api_key,
+                api_secret=creds.secret,
+                api_passphrase=creds.passphrase,
+            )
+            self.sdk_client = SdkClobClient(
+                host=self.config.clob_api_url,
+                chain_id=self.config.chain_id,
+                key=self.config.private_key,
+                creds=sdk_creds,
+                signature_type=self.config.signature_type,
+                funder=self.config.safe_address or None,
+            )
+            self.logger.info("SDK V2 client initialized (sig_type=%d)", self.config.signature_type)
+        except Exception as e:
+            self.logger.error("Failed to init SDK V2 client: %s", e)
+            self.sdk_client = None
 
     @property
     def is_connected(self) -> bool:
@@ -186,7 +276,7 @@ class TradingBot:
         order_type: str = "GTC"
     ) -> Optional[Dict[str, Any]]:
         """
-        Place an order on Polymarket.
+        Place an order on Polymarket using the official SDK.
 
         Args:
             token_id: The token ID (YES or NO token)
@@ -213,33 +303,42 @@ class TradingBot:
                 "side": side,
             }
 
-        try:
-            # Sign the order
-            signed = self.signer.sign_order_dict(
-                token_id=token_id,
-                price=price,
-                size=size,
-                side=side,
-                maker=self.config.safe_address,
-            )
+        if not self.sdk_client:
+            raise ApiError("SDK V2 client not initialized — cannot place orders")
 
-            # Submit to CLOB
-            result = self.clob.post_order(signed, order_type=order_type)
+        try:
+            sdk_side = Side.BUY if side == "BUY" else Side.SELL
+            sdk_order_type = getattr(SdkOrderType, order_type, SdkOrderType.GTC)
+
+            # SDK handles EIP-712 signing, HMAC auth, and payload construction
+            result = self.sdk_client.create_and_post_order(
+                order_args=OrderArgs(
+                    token_id=token_id,
+                    price=price,
+                    side=sdk_side,
+                    size=size,
+                ),
+                options=PartialCreateOrderOptions(),
+                order_type=sdk_order_type,
+            )
 
             self.logger.info(
                 "Order placed: %s %s @ $%.3f x %.2f -> %s",
                 side, token_id[:16], price, size,
-                result.get("orderID", "unknown")
+                result.get("orderID", "unknown") if isinstance(result, dict) else str(result)
             )
 
-            return result
+            return result if isinstance(result, dict) else {"raw": result}
 
-        except ApiError as e:
-            self.logger.error("Order failed: %s", e)
-            return None
         except Exception as e:
-            self.logger.error("Unexpected error placing order: %s", e)
-            return None
+            self.logger.error("Order failed: %s", e)
+            status_code = getattr(e, 'status_code', 0)
+            response_body = getattr(e, 'response_body', str(e))
+            raise ApiError(
+                str(e),
+                status_code=status_code if status_code else 400,
+                response_body=response_body if response_body else str(e)
+            )
 
     def cancel_order(self, order_id: str) -> bool:
         """
@@ -256,10 +355,13 @@ class TradingBot:
             return True
 
         try:
-            result = self.clob.cancel_order(order_id)
+            if self.sdk_client:
+                self.sdk_client.cancel_order(order_id)
+            else:
+                self.clob.cancel_order(order_id)
             self.logger.info("Order cancelled: %s", order_id)
             return True
-        except ApiError as e:
+        except Exception as e:
             self.logger.error("Cancel failed for %s: %s", order_id, e)
             return False
 
@@ -275,11 +377,14 @@ class TradingBot:
             return {"canceled": [], "not_canceled": []}
 
         try:
-            result = self.clob.cancel_all_orders()
-            canceled = result.get("canceled", [])
+            if self.sdk_client:
+                result = self.sdk_client.cancel_all()
+            else:
+                result = self.clob.cancel_all_orders()
+            canceled = result.get("canceled", []) if isinstance(result, dict) else []
             self.logger.info("Cancelled %d orders", len(canceled))
-            return result
-        except ApiError as e:
+            return result if isinstance(result, dict) else {"canceled": [], "not_canceled": []}
+        except Exception as e:
             self.logger.error("Cancel all failed: %s", e)
             return {"canceled": [], "not_canceled": [], "error": str(e)}
 
@@ -492,6 +597,7 @@ def create_bot_from_config(config: "Config") -> TradingBot:
         safe_address=config.safe_address,
         clob_api_url=config.clob.host,
         chain_id=config.clob.chain_id,
+        signature_type=config.clob.signature_type,
         dry_run=config.dry_run,
         creds_path=str(Path(config.data_dir) / "api_creds.json"),
     )

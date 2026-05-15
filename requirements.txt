@@ -8,8 +8,8 @@
 # CORE DEPENDENCIES
 # =============================================================================
 
-# Polymarket CLOB Client (official)
-py-clob-client>=0.1.0
+# Polymarket CLOB Client V2 (official SDK — handles EIP-712 signing + HMAC auth)
+py-clob-client-v2>=1.0.0
 
 # Web3 for Polygon interactions
 web3>=6.11.0

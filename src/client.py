@@ -62,7 +62,16 @@ logger = logging.getLogger(__name__)
 
 class ApiError(Exception):
     """Base exception for API errors."""
-    pass
+    def __init__(self, message: str, status_code: int = 0, response_body: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        if self.status_code:
+            return f"[HTTP {self.status_code}] {base}"
+        return base
 
 
 class AuthenticationError(ApiError):
@@ -88,9 +97,13 @@ class ApiCredentials:
     These credentials are derived from an L1 EIP-712 signature
     and used for authenticated endpoints (orders, trades, etc.).
     """
-    api_key: str
-    secret: str
-    passphrase: str
+
+    def __init__(self, api_key: str, secret: str, passphrase: str, safe_address: str = "") -> None:
+        self.api_key = api_key
+        self.secret = secret
+        self.passphrase = passphrase
+        # Stored to detect when the configured safe address changes between restarts.
+        self.safe_address = safe_address
 
     @classmethod
     def load(cls, filepath: str) -> "ApiCredentials":
@@ -101,6 +114,7 @@ class ApiCredentials:
             api_key=data.get("apiKey", ""),
             secret=data.get("secret", ""),
             passphrase=data.get("passphrase", ""),
+            safe_address=data.get("safeAddress", ""),
         )
 
     def save(self, filepath: str) -> None:
@@ -116,6 +130,7 @@ class ApiCredentials:
                 "apiKey": self.api_key,
                 "secret": self.secret,
                 "passphrase": self.passphrase,
+                "safeAddress": self.safe_address,
             }, f, indent=2)
 
         os.chmod(path, 0o600)
@@ -222,7 +237,7 @@ class ApiClient(ThreadLocalSessionMixin):
 
             except requests.exceptions.HTTPError as e:
                 if e.response is not None and e.response.status_code == 429:
-                    raise RateLimitError("Rate limit exceeded")
+                    raise RateLimitError("Rate limit exceeded", status_code=429)
                 last_error = e
                 self.logger.warning(f"HTTP error (attempt {attempt + 1}): {e}")
 
@@ -235,7 +250,21 @@ class ApiClient(ThreadLocalSessionMixin):
                 self.logger.debug(f"Retrying in {sleep_time}s...")
                 time.sleep(sleep_time)
 
-        raise ApiError(f"Request failed after {self.retry_count} attempts: {last_error}")
+        # Extract HTTP status code and response body from the last error if available
+        status_code = 0
+        response_body = ""
+        if isinstance(last_error, requests.exceptions.HTTPError) and last_error.response is not None:
+            status_code = last_error.response.status_code
+            try:
+                response_body = last_error.response.text
+            except Exception:
+                response_body = ""
+
+        raise ApiError(
+            f"Request failed after {self.retry_count} attempts: {last_error}",
+            status_code=status_code,
+            response_body=response_body
+        )
 
 
 class ClobClient(ApiClient):
@@ -609,16 +638,19 @@ class ClobClient(ApiClient):
         """
         endpoint = "/order"
 
-        # Build request body
+        # The signed_order dict from signer.sign_order() already has the correct
+        # structure matching official order_to_json_v2():
+        #   { "order": { salt, maker, signer, ... , signature } }
+        order_body = signed_order.get("order", signed_order)
+
+        # Build body matching official py-clob-client-v2 order_to_json_v2()
         body = {
-            "order": signed_order.get("order", signed_order),
+            "order": order_body,
             "owner": self.funder,
             "orderType": order_type,
+            "postOnly": False,
+            "deferExec": False,
         }
-
-        # Add signature
-        if "signature" in signed_order:
-            body["signature"] = signed_order["signature"]
 
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)

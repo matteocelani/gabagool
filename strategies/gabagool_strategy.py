@@ -259,16 +259,43 @@ class GabagoolStrategy:
 
         try:
             # Place YES order (wrap sync method)
-            yes_order = await asyncio.to_thread(
-                self.bot.place_order,
-                market.yes_token_id,
-                yes_price,
-                yes_shares,
-                "BUY"
-            )
-
-            if not yes_order:
-                self.logger.error("Failed to place YES order")
+            try:
+                yes_order = await asyncio.to_thread(
+                    self.bot.place_order,
+                    market.yes_token_id,
+                    yes_price,
+                    yes_shares,
+                    "BUY"
+                )
+            except Exception as order_err:
+                self.logger.error("Failed to place YES order: %s", order_err)
+                # Notify Telegram with the real error details
+                try:
+                    from src.telegram_notifier import send_order_failed
+                    profit_margin = 1.0 - (yes_price + no_price)
+                    status_code = getattr(order_err, 'status_code', 0)
+                    raw_body = getattr(order_err, 'response_body', '')
+                    # Parse JSON body and extract the "error" field for a clean message
+                    try:
+                        import json
+                        body_data = json.loads(raw_body)
+                        api_message = body_data.get('error', raw_body)
+                    except Exception:
+                        api_message = raw_body or str(order_err)
+                    if status_code:
+                        error_detail = f"HTTP {status_code} — {api_message}"
+                    else:
+                        error_detail = api_message
+                    asyncio.create_task(send_order_failed(
+                        market_id=market_id,
+                        side="YES",
+                        error_msg=error_detail,
+                        yes_price=yes_price,
+                        no_price=no_price,
+                        profit_margin=profit_margin
+                    ))
+                except Exception as notify_err:
+                    self.logger.error("Failed to send order alert: %s", notify_err)
                 return False
 
             self.logger.info("YES order placed: %s", yes_order.get("orderID", ""))
@@ -277,16 +304,42 @@ class GabagoolStrategy:
             await asyncio.sleep(0.5)
 
             # Place NO order (wrap sync method)
-            no_order = await asyncio.to_thread(
-                self.bot.place_order,
-                market.no_token_id,
-                no_price,
-                no_shares,
-                "BUY"
-            )
-
-            if not no_order:
-                self.logger.error("Failed to place NO order - YES order still active!")
+            try:
+                no_order = await asyncio.to_thread(
+                    self.bot.place_order,
+                    market.no_token_id,
+                    no_price,
+                    no_shares,
+                    "BUY"
+                )
+            except Exception as order_err:
+                self.logger.error("Failed to place NO order - YES order still active!: %s", order_err)
+                # Notify Telegram — critical: YES is already open!
+                try:
+                    from src.telegram_notifier import send_order_failed
+                    profit_margin = 1.0 - (yes_price + no_price)
+                    status_code = getattr(order_err, 'status_code', 0)
+                    raw_body = getattr(order_err, 'response_body', '')
+                    try:
+                        import json
+                        body_data = json.loads(raw_body)
+                        api_message = body_data.get('error', raw_body)
+                    except Exception:
+                        api_message = raw_body or str(order_err)
+                    if status_code:
+                        error_detail = f"HTTP {status_code} — {api_message}"
+                    else:
+                        error_detail = api_message
+                    asyncio.create_task(send_order_failed(
+                        market_id=market_id,
+                        side="NO (CRITICAL: YES order already placed!)",
+                        error_msg=error_detail,
+                        yes_price=yes_price,
+                        no_price=no_price,
+                        profit_margin=profit_margin
+                    ))
+                except Exception as notify_err:
+                    self.logger.error("Failed to send order alert: %s", notify_err)
                 # TODO: Consider canceling YES order or handling partial fill
                 return False
 
@@ -336,6 +389,27 @@ class GabagoolStrategy:
                 "Arbitrage executed: %s | Combined: $%.4f | Margin: %.2f%%",
                 market_id[:16], yes_price + no_price, profit_margin * 100
             )
+
+            # Send Telegram Notification asynchronously
+            try:
+                from src.telegram_notifier import send_arbitrage_executed
+                pos_summary = self.position_tracker.get_summary()
+                curr_exposure = pos_summary.get("total_exposure", 0.0)
+                max_exposure = getattr(self.risk_manager.config, "max_total_exposure", 500.0)
+                stats = self.stats_tracker.get_performance_summary()
+                
+                asyncio.create_task(send_arbitrage_executed(
+                    market_id=market_id,
+                    yes_price=yes_price,
+                    no_price=no_price,
+                    profit_margin=profit_margin,
+                    trade_size=self.config.trade_size,
+                    curr_exposure=curr_exposure,
+                    max_exposure=max_exposure,
+                    stats=stats
+                ))
+            except Exception as e:
+                self.logger.error("Failed to schedule telegram message: %s", e)
 
             return True
 
